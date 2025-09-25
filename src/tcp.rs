@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use rand::{Rng, rng};
 use tun_rs::AsyncDevice;
@@ -64,6 +64,7 @@ pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
+    iph: Ipv4Header,
 }
 
 #[derive(Debug, Clone)]
@@ -74,15 +75,6 @@ pub enum State {
     Estab,
 }
 
-impl Default for Connection {
-    fn default() -> Self {
-        Self {
-            state: State::Listen,
-            send: SendSequenceSpace::default(),
-            recv: RecvSequenceSpace::default(),
-        }
-    }
-}
 impl Connection {
     pub async fn accept<'a>(
         nic: &AsyncDevice,
@@ -90,12 +82,12 @@ impl Connection {
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<Option<Self>> {
+        println!("New connection: {:?}", tcph.to_header());
         if !tcph.syn() {
             return Ok(None);
         }
         let send_iss = rng().random();
-        println!("sending iss {}", send_iss);
-        let conn = Self {
+        let mut conn = Self {
             state: State::SynRcvd,
             recv: RecvSequenceSpace {
                 irs: tcph.sequence_number(),
@@ -112,6 +104,7 @@ impl Connection {
                 wl1: 0,
                 wl2: 0,
             },
+            iph: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source())?,
         };
         let mut syn_ack = TcpHeader::new(
             tcph.destination_port(),
@@ -122,16 +115,8 @@ impl Connection {
         syn_ack.ack = true;
         syn_ack.syn = true;
         syn_ack.acknowledgment_number = conn.recv.nxt;
-
-        let diph = Ipv4Header::new(
-            syn_ack.header_len() as u16,
-            TTL,
-            IpNumber::TCP,
-            iph.destination(),
-            iph.source(),
-        )?;
-
-        nic.send(&[diph.to_bytes(), syn_ack.to_bytes()].concat())
+        conn.iph.set_payload_len(syn_ack.header_len());
+        nic.send(&[conn.iph.to_bytes(), syn_ack.to_bytes()].concat())
             .await?;
         Ok(Some(conn))
     }
@@ -143,7 +128,26 @@ impl Connection {
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
-        println!("Existing Connection received!");
+        match self.state {
+            State::SynRcvd => {
+                println!("Old Connection {:?}", tcph.to_header());
+                if tcph.ack()
+                    && tcph.acknowledgment_number() == self.send.nxt
+                    && tcph.sequence_number() == self.recv.nxt
+                {
+                    self.state = State::Estab;
+                } else {
+                    println!("failed to establish TCP connection");
+                    //bail!("failed to establish TCP connection");
+                }
+            }
+            State::Estab => {
+                bail!("established");
+            }
+            State::Closed | State::Listen => {
+                bail!("unexpected state {:?}", self.state);
+            }
+        }
         Ok(())
     }
 }

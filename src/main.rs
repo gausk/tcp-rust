@@ -20,12 +20,13 @@ async fn main() -> Result<()> {
     let mut connections: HashMap<Quad, Connection> = Default::default();
     let dev = DeviceBuilder::new()
         .name("utun7")
-        .ipv4("192.168.0.1", 24, None)
+        .ipv4("10.0.0.1", 24, None)
         .build_async()
         .unwrap();
     let mut buf = [0; 65535];
     loop {
         let len = dev.recv(&mut buf).await.unwrap();
+        println!("len: {}", len);
         match Ipv4HeaderSlice::from_slice(&buf[..len]) {
             Ok(iph) => {
                 if iph.protocol().0 != 6 {
