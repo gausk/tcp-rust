@@ -1,7 +1,7 @@
 #![allow(unused)]
 mod tcp;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use etherparse::{Ipv4HeaderSlice, TcpHeaderSlice};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
