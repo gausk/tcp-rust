@@ -82,7 +82,6 @@ impl Connection {
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<Option<Self>> {
-        println!("New connection: {:?}", tcph.to_header());
         if !tcph.syn() {
             return Ok(None);
         }
@@ -112,10 +111,13 @@ impl Connection {
             conn.send.iss,
             TCP_WINDOW_LEN,
         );
+        conn.iph.set_payload_len(syn_ack.to_bytes().len());
+        conn.iph.header_checksum = conn.iph.calc_header_checksum();
         syn_ack.ack = true;
         syn_ack.syn = true;
         syn_ack.acknowledgment_number = conn.recv.nxt;
-        conn.iph.set_payload_len(syn_ack.header_len());
+        // Add ipv4 header checksum
+        syn_ack.checksum = syn_ack.calc_checksum_ipv4(&conn.iph, &[]).unwrap();
         nic.send(&[conn.iph.to_bytes(), syn_ack.to_bytes()].concat())
             .await?;
         Ok(Some(conn))
@@ -130,19 +132,17 @@ impl Connection {
     ) -> Result<()> {
         match self.state {
             State::SynRcvd => {
-                println!("Old Connection {:?}", tcph.to_header());
                 if tcph.ack()
                     && tcph.acknowledgment_number() == self.send.nxt
                     && tcph.sequence_number() == self.recv.nxt
                 {
                     self.state = State::Estab;
                 } else {
-                    println!("failed to establish TCP connection");
-                    //bail!("failed to establish TCP connection");
+                    bail!("failed to establish TCP connection");
                 }
             }
             State::Estab => {
-                bail!("established");
+                println!("established");
             }
             State::Closed | State::Listen => {
                 bail!("unexpected state {:?}", self.state);

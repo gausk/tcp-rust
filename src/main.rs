@@ -1,7 +1,7 @@
 #![allow(unused)]
 mod tcp;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use etherparse::{Ipv4HeaderSlice, TcpHeaderSlice};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -20,13 +20,12 @@ async fn main() -> Result<()> {
     let mut connections: HashMap<Quad, Connection> = Default::default();
     let dev = DeviceBuilder::new()
         .name("utun7")
-        .ipv4("10.0.0.1", 24, None)
+        .ipv4("192.68.0.1", 24, None)
         .build_async()
         .unwrap();
     let mut buf = [0; 65535];
     loop {
         let len = dev.recv(&mut buf).await.unwrap();
-        println!("len: {}", len);
         match Ipv4HeaderSlice::from_slice(&buf[..len]) {
             Ok(iph) => {
                 if iph.protocol().0 != 6 {
@@ -54,12 +53,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error parsing tcp header {e}");
+                        bail!("Error parsing tcp header {e}");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Error parsing ipv4 header {e}");
+                bail!("Error parsing ipv4 header {e}");
             }
         }
     }
