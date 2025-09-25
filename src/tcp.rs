@@ -59,12 +59,14 @@ pub struct RecvSequenceSpace {
     irs: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
 }
 
+#[derive(Debug, Clone)]
 pub enum State {
     Closed,
     Listen,
@@ -82,62 +84,66 @@ impl Default for Connection {
     }
 }
 impl Connection {
-    pub async fn on_packets<'a>(
+    pub async fn accept<'a>(
+        nic: &AsyncDevice,
+        iph: Ipv4HeaderSlice<'a>,
+        tcph: TcpHeaderSlice<'a>,
+        data: &'a [u8],
+    ) -> Result<Option<Self>> {
+        if !tcph.syn() {
+            return Ok(None);
+        }
+        let send_iss = rng().random();
+        println!("sending iss {}", send_iss);
+        let conn = Self {
+            state: State::SynRcvd,
+            recv: RecvSequenceSpace {
+                irs: tcph.sequence_number(),
+                wnd: tcph.window_size(),
+                nxt: tcph.sequence_number().wrapping_add(1),
+                up: false,
+            },
+            send: SendSequenceSpace {
+                una: send_iss,
+                nxt: send_iss.wrapping_add(1),
+                iss: send_iss,
+                wnd: TCP_WINDOW_LEN,
+                up: false,
+                wl1: 0,
+                wl2: 0,
+            },
+        };
+        let mut syn_ack = TcpHeader::new(
+            tcph.destination_port(),
+            tcph.source_port(),
+            conn.send.iss,
+            TCP_WINDOW_LEN,
+        );
+        syn_ack.ack = true;
+        syn_ack.syn = true;
+        syn_ack.acknowledgment_number = conn.recv.nxt;
+
+        let diph = Ipv4Header::new(
+            syn_ack.header_len() as u16,
+            TTL,
+            IpNumber::TCP,
+            iph.destination(),
+            iph.source(),
+        )?;
+
+        nic.send(&[diph.to_bytes(), syn_ack.to_bytes()].concat())
+            .await?;
+        Ok(Some(conn))
+    }
+
+    pub fn on_packet<'a>(
         &mut self,
         nic: &AsyncDevice,
         iph: Ipv4HeaderSlice<'a>,
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
-        match self.state {
-            State::Closed => {}
-            State::Listen => {
-                if tcph.syn() {
-                    // keep track of sender info
-                    self.recv.irs = tcph.sequence_number();
-                    self.recv.wnd = tcph.window_size();
-                    self.recv.nxt = tcph.sequence_number().wrapping_add(1);
-                    self.state = State::SynRcvd;
-
-                    // stuff we are sending them
-                    self.send.iss = rng().random();
-                    self.send.nxt = self.send.iss.wrapping_add(1);
-                    self.send.una = self.send.iss;
-                    self.send.wnd = TCP_WINDOW_LEN;
-
-                    let mut syn_ack = TcpHeader::new(
-                        tcph.destination_port(),
-                        tcph.source_port(),
-                        self.send.iss,
-                        TCP_WINDOW_LEN,
-                    );
-                    syn_ack.ack = true;
-                    syn_ack.ack = true;
-                    syn_ack.acknowledgment_number = self.recv.nxt;
-
-                    let diph = Ipv4Header::new(
-                        syn_ack.header_len() as u16,
-                        TTL,
-                        IpNumber::TCP,
-                        iph.destination(),
-                        iph.source(),
-                    )?;
-
-                    nic.send(&[diph.to_bytes(), syn_ack.to_bytes()].concat())
-                        .await?;
-                }
-            }
-            State::SynRcvd => {}
-            State::Estab => {}
-        }
-        println!(
-            "{}:{} -> {}:{} {}b of tcp data",
-            iph.source_addr(),
-            tcph.source_port(),
-            iph.destination_addr(),
-            tcph.destination_port(),
-            data.len()
-        );
+        println!("Existing Connection received!");
         Ok(())
     }
 }

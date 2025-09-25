@@ -1,8 +1,10 @@
+#![allow(unused)]
 mod tcp;
 
 use anyhow::Result;
 use etherparse::{Ipv4HeaderSlice, TcpHeaderSlice};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::net::Ipv4Addr;
 use tcp::Connection;
 use tun_rs::DeviceBuilder;
@@ -32,14 +34,23 @@ async fn main() -> Result<()> {
                 match TcpHeaderSlice::from_slice(&buf[iph.slice().len()..]) {
                     Ok(tcph) => {
                         let datai = iph.slice().len() + tcph.slice().len();
-                        connections
-                            .entry(Quad {
-                                src: (iph.source_addr(), tcph.source_port()),
-                                dst: (iph.destination_addr(), tcph.destination_port()),
-                            })
-                            .or_default()
-                            .on_packets(&dev, iph, tcph, &buf[datai..len])
-                            .await?;
+                        match connections.entry(Quad {
+                            src: (iph.source_addr(), tcph.source_port()),
+                            dst: (iph.destination_addr(), tcph.destination_port()),
+                        }) {
+                            Entry::Occupied(mut entry) => {
+                                entry
+                                    .get_mut()
+                                    .on_packet(&dev, iph, tcph, &buf[datai..len])?;
+                            }
+                            Entry::Vacant(entry) => {
+                                if let Some(conn) =
+                                    Connection::accept(&dev, iph, tcph, &buf[datai..len]).await?
+                                {
+                                    entry.insert(conn);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Error parsing tcp header {e}");
