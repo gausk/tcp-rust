@@ -153,6 +153,8 @@ impl Connection {
         conn.tcph.ack = true;
         conn.tcph.syn = true;
         conn.write(nic, send_iss, &[]).await?;
+        conn.tcph.ack = false;
+        conn.tcph.syn = false;
         Ok(Some(conn))
     }
 
@@ -174,7 +176,7 @@ impl Connection {
         }
         match self.state {
             State::SynRcvd => {
-                if tcph.ack() {
+                if tcph.ack() && ack_no == self.send.iss.wrapping_add(1) {
                     self.state = State::Estab;
                 } else {
                     bail!("failed to establish TCP connection");
@@ -191,11 +193,10 @@ impl Connection {
     }
 
     async fn send_reset(&mut self, nic: &AsyncDevice) -> Result<()> {
-        self.tcph.rst = true;
         // If the connection is in a synchronized state (ESTABLISHED,
         // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
         // any unacceptable segment (out of window sequence number or
-        // unacceptible acknowledgment number) must elicit only an empty
+        // unacceptable acknowledgment number) must elicit only an empty
         // acknowledgment segment containing the current send-sequence number
         // and an acknowledgment indicating the next sequence number expected
         // to be received, and the connection remains in the same state.
@@ -210,6 +211,7 @@ impl Connection {
         // The connection remains in the same state.
 
         if !self.state.is_synchronized() {
+            self.tcph.rst = true;
             let seq_no = if self.tcph.ack {
                 self.tcph.acknowledgment_number
             } else {
@@ -217,7 +219,9 @@ impl Connection {
                 0
             };
             // TODO: correctly handle acknowledgment number
-            self.write(nic, 0, &[]).await?;
+            self.write(nic, seq_no, &[]).await?;
+            self.tcph.rst = false;
+            self.tcph.ack = false;
         }
         Ok(())
     }
@@ -232,13 +236,7 @@ impl Connection {
         self.tcph.checksum = self.tcph.calc_checksum_ipv4(&self.iph, data)?;
         nic.send(&[&self.iph.to_bytes(), &self.tcph.to_bytes(), data].concat())
             .await?;
-        self.send.nxt = self.segment_length(data);
-        if self.tcph.syn {
-            self.tcph.syn = false;
-        }
-        if self.tcph.fin {
-            self.tcph.fin = false;
-        }
+        self.send.nxt = seq_no.wrapping_add(self.segment_length(data));
         Ok(())
     }
 
