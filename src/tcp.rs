@@ -36,6 +36,15 @@ pub struct SendSequenceSpace {
     iss: u32,
 }
 
+impl SendSequenceSpace {
+    /// `SND.UNA < SEG.ACK =< SND.NXT`
+    fn is_ack_in_between(&self, ack_no: u32) -> bool {
+        let max_diff = self.nxt.wrapping_sub(self.una);
+        let current_diff = ack_no.wrapping_sub(self.una);
+        current_diff != 0 && current_diff <= max_diff
+    }
+}
+
 /// State of Receive Sequence Space (RFC 793 S3.2 F5)
 /// ```
 ///    1          2          3
@@ -59,12 +68,32 @@ pub struct RecvSequenceSpace {
     irs: u32,
 }
 
+impl RecvSequenceSpace {
+    /// start or end bytes of the segment is within range
+    /// ```
+    /// RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+    ///              OR
+    /// RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+    /// ```
+    /// In case window is zero, ack is only allowed
+    fn is_seq_in_between(&self, seq_no: u32, seq_len: usize) -> bool {
+        let max_diff = self.wnd as u32;
+        let start_current_diff = seq_no.wrapping_sub(self.nxt);
+        let end_current_diff = (seq_no + seq_len as u32 - 1).wrapping_sub(self.nxt);
+        // Third check will only be reached if self.wnd = 0 when seq_len = 0
+        start_current_diff < max_diff
+            || end_current_diff < max_diff
+            || (seq_len == 0 && seq_no == self.nxt)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
     iph: Ipv4Header,
+    tcph: TcpHeader,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +102,15 @@ pub enum State {
     Listen,
     SynRcvd,
     Estab,
+}
+
+impl State {
+    fn is_synchronized(&self) -> bool {
+        match &self {
+            State::Estab => true,
+            State::SynRcvd | State::Closed | State::Listen => false,
+        }
+    }
 }
 
 impl Connection {
@@ -96,46 +134,47 @@ impl Connection {
             },
             send: SendSequenceSpace {
                 una: send_iss,
-                nxt: send_iss.wrapping_add(1),
+                nxt: send_iss,
                 iss: send_iss,
-                wnd: TCP_WINDOW_LEN,
+                wnd: tcph.window_size(),
                 up: false,
                 wl1: 0,
                 wl2: 0,
             },
             iph: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source())?,
+            tcph: TcpHeader::new(
+                tcph.destination_port(),
+                tcph.source_port(),
+                send_iss,
+                TCP_WINDOW_LEN,
+            ),
         };
-        let mut syn_ack = TcpHeader::new(
-            tcph.destination_port(),
-            tcph.source_port(),
-            conn.send.iss,
-            TCP_WINDOW_LEN,
-        );
-        conn.iph.set_payload_len(syn_ack.to_bytes().len());
-        conn.iph.header_checksum = conn.iph.calc_header_checksum();
-        syn_ack.ack = true;
-        syn_ack.syn = true;
-        syn_ack.acknowledgment_number = conn.recv.nxt;
-        // Add ipv4 header checksum
-        syn_ack.checksum = syn_ack.calc_checksum_ipv4(&conn.iph, &[]).unwrap();
-        nic.send(&[conn.iph.to_bytes(), syn_ack.to_bytes()].concat())
-            .await?;
+
+        conn.tcph.ack = true;
+        conn.tcph.syn = true;
+        conn.write(nic, send_iss, &[]).await?;
         Ok(Some(conn))
     }
 
-    pub fn on_packet<'a>(
+    pub async fn on_packet<'a>(
         &mut self,
         nic: &AsyncDevice,
         iph: Ipv4HeaderSlice<'a>,
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
+        let seq_no = tcph.sequence_number();
+        let mut slen = data.len() + tcph.syn() as usize + tcph.fin() as usize;
+        if !self.recv.is_seq_in_between(seq_no, slen) {
+            bail!("Sequence number not in receive range");
+        }
+        let ack_no = tcph.acknowledgment_number();
+        if !self.send.is_ack_in_between(ack_no) {
+            self.send_reset(nic).await?
+        }
         match self.state {
             State::SynRcvd => {
-                if tcph.ack()
-                    && tcph.acknowledgment_number() == self.send.nxt
-                    && tcph.sequence_number() == self.recv.nxt
-                {
+                if tcph.ack() {
                     self.state = State::Estab;
                 } else {
                     bail!("failed to establish TCP connection");
@@ -149,5 +188,62 @@ impl Connection {
             }
         }
         Ok(())
+    }
+
+    async fn send_reset(&mut self, nic: &AsyncDevice) -> Result<()> {
+        self.tcph.rst = true;
+        // If the connection is in a synchronized state (ESTABLISHED,
+        // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
+        // any unacceptable segment (out of window sequence number or
+        // unacceptible acknowledgment number) must elicit only an empty
+        // acknowledgment segment containing the current send-sequence number
+        // and an acknowledgment indicating the next sequence number expected
+        // to be received, and the connection remains in the same state.
+
+        // So we don't send RST in synchronized state instead just ACK.
+
+        // If the connection is in any non-synchronized state (LISTEN,
+        // SYN-SENT, SYN-RECEIVED), If the incoming segment has an ACK field,
+        // the reset takes its sequence number from the ACK field of the segment,
+        // otherwise the reset has sequence number zero and the ACK field is set to the sum
+        // of the sequence number and segment length of the incoming segment.
+        // The connection remains in the same state.
+
+        if !self.state.is_synchronized() {
+            let seq_no = if self.tcph.ack {
+                self.tcph.acknowledgment_number
+            } else {
+                self.tcph.ack = true;
+                0
+            };
+            // TODO: correctly handle acknowledgment number
+            self.write(nic, 0, &[]).await?;
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, data: &[u8]) -> Result<()> {
+        self.iph
+            .set_payload_len(self.tcph.header_len() + data.len());
+        self.iph.header_checksum = self.iph.calc_header_checksum();
+
+        self.tcph.sequence_number = seq_no;
+        self.tcph.acknowledgment_number = self.recv.nxt;
+        self.tcph.checksum = self.tcph.calc_checksum_ipv4(&self.iph, data)?;
+        nic.send(&[&self.iph.to_bytes(), &self.tcph.to_bytes(), data].concat())
+            .await?;
+        self.send.nxt = self.segment_length(data);
+        if self.tcph.syn {
+            self.tcph.syn = false;
+        }
+        if self.tcph.fin {
+            self.tcph.fin = false;
+        }
+        Ok(())
+    }
+
+    fn segment_length(&self, data: &[u8]) -> u32 {
+        // SEG.LEN = the number of octets occupied by the data in the segment (counting SYN and FIN)
+        data.len() as u32 + self.tcph.syn as u32 + self.tcph.fin as u32
     }
 }

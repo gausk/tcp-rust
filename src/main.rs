@@ -2,6 +2,8 @@
 mod tcp;
 
 use anyhow::{Result, bail};
+use etherparse::icmpv4::DestUnreachableHeader::Protocol;
+use etherparse::ip_number::TCP;
 use etherparse::{Ipv4HeaderSlice, TcpHeaderSlice};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -28,7 +30,7 @@ async fn main() -> Result<()> {
         let len = dev.recv(&mut buf).await.unwrap();
         match Ipv4HeaderSlice::from_slice(&buf[..len]) {
             Ok(iph) => {
-                if iph.protocol().0 != 6 {
+                if iph.protocol() != TCP {
                     continue;
                 }
                 match TcpHeaderSlice::from_slice(&buf[iph.slice().len()..]) {
@@ -41,7 +43,8 @@ async fn main() -> Result<()> {
                             Entry::Occupied(mut entry) => {
                                 entry
                                     .get_mut()
-                                    .on_packet(&dev, iph, tcph, &buf[datai..len])?;
+                                    .on_packet(&dev, iph, tcph, &buf[datai..len])
+                                    .await?;
                             }
                             Entry::Vacant(entry) => {
                                 if let Some(conn) =
