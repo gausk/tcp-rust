@@ -77,13 +77,20 @@ impl RecvSequenceSpace {
     /// ```
     /// In case window is zero, ack is only allowed
     fn is_seq_in_between(&self, seq_no: u32, seq_len: usize) -> bool {
-        let max_diff = self.wnd as u32;
-        let start_current_diff = seq_no.wrapping_sub(self.nxt);
-        let end_current_diff = (seq_no + seq_len as u32 - 1).wrapping_sub(self.nxt);
-        // Third check will only be reached if self.wnd = 0 when seq_len = 0
-        start_current_diff < max_diff
-            || end_current_diff < max_diff
-            || (seq_len == 0 && seq_no == self.nxt)
+        let wnd = self.wnd as u32;
+
+        if wnd == 0 {
+            // Special case: window is zero
+            return seq_len == 0 && seq_no == self.nxt;
+        }
+
+        let start_diff = seq_no.wrapping_sub(self.nxt);
+        let end_diff = seq_no
+            .wrapping_add(seq_len as u32)
+            .wrapping_sub(1)
+            .wrapping_sub(self.nxt);
+
+        start_diff < wnd || end_diff < wnd
     }
 }
 
@@ -102,12 +109,14 @@ pub enum State {
     Listen,
     SynRcvd,
     Estab,
+    FinWait1,
+    FinWait2,
 }
 
 impl State {
     fn is_synchronized(&self) -> bool {
-        match &self {
-            State::Estab => true,
+        match self {
+            State::Estab | State::FinWait1 | State::FinWait2 => true,
             State::SynRcvd | State::Closed | State::Listen => false,
         }
     }
@@ -168,25 +177,62 @@ impl Connection {
         let seq_no = tcph.sequence_number();
         let mut slen = data.len() + tcph.syn() as usize + tcph.fin() as usize;
         if !self.recv.is_seq_in_between(seq_no, slen) {
-            bail!("Sequence number not in receive range");
+            // If an incoming segment is not acceptable, an acknowledgment
+            // should be sent in reply (unless the RST bit is set, if so drop
+            // the segment and return):
+            //
+            // `<SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>`
+            if !tcph.rst() {
+                self.tcph.ack = true;
+                // passing seq number here and ack get set in write function
+                self.write(nic, self.send.nxt, data).await?;
+                self.tcph.ack = false;
+                return Ok(());
+            }
         }
+        self.recv.nxt = seq_no.wrapping_add(slen as u32);
+
+        // TODO: Check for reset but here
+        // If SYN-RECEIVED STATE, move state to Listen
+        // else if state is ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2 or
+        // CLOSE-WAIT, close the connection.
+
         let ack_no = tcph.acknowledgment_number();
         if !self.send.is_ack_in_between(ack_no) {
+            self.tcph = tcph.to_header();
             self.send_reset(nic).await?
         }
+        self.send.una = ack_no;
         match self.state {
             State::SynRcvd => {
                 if tcph.ack() && ack_no == self.send.iss.wrapping_add(1) {
                     self.state = State::Estab;
+
+                    // For now let's terminate the connection!
+                    self.tcph.fin = true;
+                    self.write(nic, self.send.nxt, &[]).await?;
+                    self.state = State::FinWait1;
+                    self.tcph.fin = false;
                 } else {
                     bail!("failed to establish TCP connection");
                 }
             }
-            State::Estab => {
-                println!("established");
-            }
+            State::Estab => {}
             State::Closed | State::Listen => {
-                bail!("unexpected state {:?}", self.state);
+                println!("unexpected state {:?}", self.state);
+            }
+            State::FinWait1 => {
+                if tcph.ack() {
+                    self.state = State::FinWait2;
+                }
+            }
+            State::FinWait2 => {
+                if tcph.fin() {
+                    self.state = State::Closed;
+                    self.tcph.ack = true;
+                    self.write(nic, self.send.nxt, &[]).await?;
+                    self.tcph.ack = true;
+                }
             }
         }
         Ok(())
@@ -236,12 +282,12 @@ impl Connection {
         self.tcph.checksum = self.tcph.calc_checksum_ipv4(&self.iph, data)?;
         nic.send(&[&self.iph.to_bytes(), &self.tcph.to_bytes(), data].concat())
             .await?;
-        self.send.nxt = seq_no.wrapping_add(self.segment_length(data));
+        self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcph.syn, self.tcph.fin));
         Ok(())
     }
+}
 
-    fn segment_length(&self, data: &[u8]) -> u32 {
-        // SEG.LEN = the number of octets occupied by the data in the segment (counting SYN and FIN)
-        data.len() as u32 + self.tcph.syn as u32 + self.tcph.fin as u32
-    }
+fn segment_length(data: &[u8], is_syn: bool, is_fin: bool) -> u32 {
+    // SEG.LEN = the number of octets occupied by the data in the segment (counting SYN and FIN)
+    data.len() as u32 + is_syn as u32 + is_fin as u32
 }
