@@ -174,6 +174,7 @@ impl Connection {
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
+        /// 1. Check Sequence number
         let seq_no = tcph.sequence_number();
         let mut slen = data.len() + tcph.syn() as usize + tcph.fin() as usize;
         if !self.recv.is_seq_in_between(seq_no, slen) {
@@ -192,17 +193,66 @@ impl Connection {
         }
         self.recv.nxt = seq_no.wrapping_add(slen as u32);
 
-        // TODO: Check for reset but here
+        /// 2. Check reset bit is set
         // If SYN-RECEIVED STATE, move state to Listen
         // else if state is ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2 or
         // CLOSE-WAIT, close the connection.
+        if tcph.rst() {
+            self.state = State::Closed;
+            // TODO: maybe send reset in some case only
+            self.send_reset(nic).await?;
+            return Ok(())
+        }
 
+        /// 3. Ignore security checks
+        /// 4. Check the SYN bit.
+        if tcph.syn() {
+            self.send_reset(nic).await?;
+            self.state = State::Closed;
+            return Ok(())
+        }
+
+        /// 5. Check the ack bit
         let ack_no = tcph.acknowledgment_number();
         if !self.send.is_ack_in_between(ack_no) {
-            self.tcph = tcph.to_header();
-            self.send_reset(nic).await?
+            // If the connection is in a synchronized state (ESTABLISHED,
+            // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
+            // any unacceptable segment (out of window sequence number or
+            // unacceptable acknowledgment number) must elicit only an empty
+            // acknowledgment segment containing the current send-sequence number
+            // and an acknowledgment indicating the next sequence number expected
+            // to be received, and the connection remains in the same state.
+
+            // So we don't send RST in synchronized state instead just ACK.
+
+            // If the connection is in any non-synchronized state (LISTEN,
+            // SYN-SENT, SYN-RECEIVED), If the incoming segment has an ACK field,
+            // the reset takes its sequence number from the ACK field of the segment,
+            // otherwise the reset has sequence number zero and the ACK field is set to the sum
+            // of the sequence number and segment length of the incoming segment.
+            // The connection remains in the same state.
+            if !self.state.is_synchronized() {
+                // TODO: we should send ack number in sequence number here
+                self.send_reset(nic).await?
+            } else {
+                // TODO: send ack here.
+            }
         }
         self.send.una = ack_no;
+        /// 6. Check the urg bit
+        if tcph.urg() {
+            // TODO: Handle it correctly.
+            // State: ESTABLISHED, FIN-WAIT-1 and FIN-WAIT-2
+            // If the URG bit is set, RCV.UP <- max(RCV.UP,SEG.UP), and signal
+            // the user that the remote side has urgent data if the urgent
+            // pointer (RCV.UP) is in advance of the data consumed.  If the
+            // user has already been signaled (or is still in the "urgent
+            // mode") for this continuous sequence of urgent data, do not
+            // signal the user again.
+            // For other state ignore.
+        }
+        /// 7. Process the segment bit.
+        /// 8. Check the fin bit.
         match self.state {
             State::SynRcvd => {
                 if tcph.ack() && ack_no == self.send.iss.wrapping_add(1) {
@@ -217,7 +267,9 @@ impl Connection {
                     bail!("failed to establish TCP connection");
                 }
             }
-            State::Estab => {}
+            State::Estab => {
+
+            },
             State::Closed | State::Listen => {
                 println!("unexpected state {:?}", self.state);
             }
@@ -239,36 +291,9 @@ impl Connection {
     }
 
     async fn send_reset(&mut self, nic: &AsyncDevice) -> Result<()> {
-        // If the connection is in a synchronized state (ESTABLISHED,
-        // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
-        // any unacceptable segment (out of window sequence number or
-        // unacceptable acknowledgment number) must elicit only an empty
-        // acknowledgment segment containing the current send-sequence number
-        // and an acknowledgment indicating the next sequence number expected
-        // to be received, and the connection remains in the same state.
-
-        // So we don't send RST in synchronized state instead just ACK.
-
-        // If the connection is in any non-synchronized state (LISTEN,
-        // SYN-SENT, SYN-RECEIVED), If the incoming segment has an ACK field,
-        // the reset takes its sequence number from the ACK field of the segment,
-        // otherwise the reset has sequence number zero and the ACK field is set to the sum
-        // of the sequence number and segment length of the incoming segment.
-        // The connection remains in the same state.
-
-        if !self.state.is_synchronized() {
-            self.tcph.rst = true;
-            let seq_no = if self.tcph.ack {
-                self.tcph.acknowledgment_number
-            } else {
-                self.tcph.ack = true;
-                0
-            };
-            // TODO: correctly handle acknowledgment number
-            self.write(nic, seq_no, &[]).await?;
-            self.tcph.rst = false;
-            self.tcph.ack = false;
-        }
+        self.tcph.rst = true;
+        self.write(nic, 0, &[]).await?;
+        self.tcph.rst = false;
         Ok(())
     }
 
