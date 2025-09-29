@@ -213,32 +213,35 @@ impl Connection {
         }
 
         /// 5. Check the ack bit
-        let ack_no = tcph.acknowledgment_number();
-        if !self.send.is_ack_in_between(ack_no) {
-            // If the connection is in a synchronized state (ESTABLISHED,
-            // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
-            // any unacceptable segment (out of window sequence number or
-            // unacceptable acknowledgment number) must elicit only an empty
-            // acknowledgment segment containing the current send-sequence number
-            // and an acknowledgment indicating the next sequence number expected
-            // to be received, and the connection remains in the same state.
+        if tcph.ack() {
+            let ack_no = tcph.acknowledgment_number();
+            if !self.send.is_ack_in_between(ack_no) {
+                // If the connection is in a synchronized state (ESTABLISHED,
+                // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
+                // any unacceptable segment (out of window sequence number or
+                // unacceptable acknowledgment number) must elicit only an empty
+                // acknowledgment segment containing the current send-sequence number
+                // and an acknowledgment indicating the next sequence number expected
+                // to be received, and the connection remains in the same state.
 
-            // So we don't send RST in synchronized state instead just ACK.
+                // So we don't send RST in synchronized state instead just ACK.
 
-            // If the connection is in any non-synchronized state (LISTEN,
-            // SYN-SENT, SYN-RECEIVED), If the incoming segment has an ACK field,
-            // the reset takes its sequence number from the ACK field of the segment,
-            // otherwise the reset has sequence number zero and the ACK field is set to the sum
-            // of the sequence number and segment length of the incoming segment.
-            // The connection remains in the same state.
-            if !self.state.is_synchronized() {
-                // TODO: we should send ack number in sequence number here
-                self.send_reset(nic).await?
-            } else {
-                // TODO: send ack here.
+                // If the connection is in any non-synchronized state (LISTEN,
+                // SYN-SENT, SYN-RECEIVED), If the incoming segment has an ACK field,
+                // the reset takes its sequence number from the ACK field of the segment,
+                // otherwise the reset has sequence number zero and the ACK field is set to the sum
+                // of the sequence number and segment length of the incoming segment.
+                // The connection remains in the same state.
+                if !self.state.is_synchronized() {
+                    // <SEQ=SEG.ACK><CTL=RST>
+                    // TODO: we should send ack number in sequence number here
+                    self.send_reset(nic).await?
+                } else {
+                    // TODO: send ack here.
+                }
             }
+            self.send.una = ack_no;
         }
-        self.send.una = ack_no;
         /// 6. Check the urg bit
         if tcph.urg() {
             // TODO: Handle it correctly.
@@ -255,19 +258,21 @@ impl Connection {
         /// 8. Check the fin bit.
         match self.state {
             State::SynRcvd => {
-                if tcph.ack() && ack_no == self.send.iss.wrapping_add(1) {
+                if tcph.ack() && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1) {
                     self.state = State::Estab;
-
-                    // For now let's terminate the connection!
-                    self.tcph.fin = true;
-                    self.write(nic, self.send.nxt, &[]).await?;
-                    self.state = State::FinWait1;
-                    self.tcph.fin = false;
                 } else {
                     bail!("failed to establish TCP connection");
                 }
             }
-            State::Estab => {}
+            State::Estab => {
+                // For now let's terminate the connection!
+                self.tcph.fin = true;
+                self.tcph.ack = true;
+                self.write(nic, self.send.nxt, &[]).await?;
+                self.state = State::FinWait1;
+                self.tcph.fin = false;
+                self.tcph.ack = true;
+            }
             State::Closed | State::Listen => {
                 println!("unexpected state {:?}", self.state);
             }
@@ -281,7 +286,7 @@ impl Connection {
                     self.state = State::Closed;
                     self.tcph.ack = true;
                     self.write(nic, self.send.nxt, &[]).await?;
-                    self.tcph.ack = true;
+                    self.tcph.ack = false;
                 }
             }
         }
