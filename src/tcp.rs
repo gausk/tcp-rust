@@ -99,8 +99,8 @@ pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: RecvSequenceSpace,
-    iph: Ipv4Header,
-    tcph: TcpHeader,
+    ip: Ipv4Header,
+    tcp: TcpHeader,
 }
 
 #[derive(Debug, Clone)]
@@ -150,8 +150,8 @@ impl Connection {
                 wl1: 0,
                 wl2: 0,
             },
-            iph: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source())?,
-            tcph: TcpHeader::new(
+            ip: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source())?,
+            tcp: TcpHeader::new(
                 tcph.destination_port(),
                 tcph.source_port(),
                 send_iss,
@@ -159,11 +159,11 @@ impl Connection {
             ),
         };
 
-        conn.tcph.ack = true;
-        conn.tcph.syn = true;
+        conn.tcp.ack = true;
+        conn.tcp.syn = true;
         conn.write(nic, send_iss, &[]).await?;
-        conn.tcph.ack = false;
-        conn.tcph.syn = false;
+        conn.tcp.ack = false;
+        conn.tcp.syn = false;
         Ok(Some(conn))
     }
 
@@ -184,10 +184,10 @@ impl Connection {
             //
             // `<SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>`
             if !tcph.rst() {
-                self.tcph.ack = true;
+                self.tcp.ack = true;
                 // passing seq number here and ack get set in write function
-                self.write(nic, self.send.nxt, data).await?;
-                self.tcph.ack = false;
+                self.write(nic, self.send.nxt, &[]).await?;
+                self.tcp.ack = false;
                 return Ok(());
             }
         }
@@ -239,6 +239,7 @@ impl Connection {
                 } else {
                     // TODO: send ack here.
                 }
+                return Ok(());
             }
             self.send.una = ack_no;
         }
@@ -266,12 +267,12 @@ impl Connection {
             }
             State::Estab => {
                 // For now let's terminate the connection!
-                self.tcph.fin = true;
-                self.tcph.ack = true;
+                self.tcp.fin = true;
+                self.tcp.ack = true;
                 self.write(nic, self.send.nxt, &[]).await?;
                 self.state = State::FinWait1;
-                self.tcph.fin = false;
-                self.tcph.ack = true;
+                self.tcp.fin = false;
+                self.tcp.ack = true;
             }
             State::Closed | State::Listen => {
                 println!("unexpected state {:?}", self.state);
@@ -284,9 +285,9 @@ impl Connection {
             State::FinWait2 => {
                 if tcph.fin() {
                     self.state = State::Closed;
-                    self.tcph.ack = true;
+                    self.tcp.ack = true;
                     self.write(nic, self.send.nxt, &[]).await?;
-                    self.tcph.ack = false;
+                    self.tcp.ack = false;
                 }
             }
         }
@@ -294,23 +295,22 @@ impl Connection {
     }
 
     async fn send_reset(&mut self, nic: &AsyncDevice) -> Result<()> {
-        self.tcph.rst = true;
+        self.tcp.rst = true;
         self.write(nic, 0, &[]).await?;
-        self.tcph.rst = false;
+        self.tcp.rst = false;
         Ok(())
     }
 
     async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, data: &[u8]) -> Result<()> {
-        self.iph
-            .set_payload_len(self.tcph.header_len() + data.len());
-        self.iph.header_checksum = self.iph.calc_header_checksum();
+        self.ip.set_payload_len(self.tcp.header_len() + data.len());
+        self.ip.header_checksum = self.ip.calc_header_checksum();
 
-        self.tcph.sequence_number = seq_no;
-        self.tcph.acknowledgment_number = self.recv.nxt;
-        self.tcph.checksum = self.tcph.calc_checksum_ipv4(&self.iph, data)?;
-        nic.send(&[&self.iph.to_bytes(), &self.tcph.to_bytes(), data].concat())
+        self.tcp.sequence_number = seq_no;
+        self.tcp.acknowledgment_number = self.recv.nxt;
+        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, data)?;
+        nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
             .await?;
-        self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcph.syn, self.tcph.fin));
+        self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcp.syn, self.tcp.fin));
         Ok(())
     }
 }
