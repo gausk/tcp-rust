@@ -201,7 +201,7 @@ impl Connection {
             self.state = State::Closed;
             // TODO: maybe send reset in some case only
             self.send_reset(nic).await?;
-            return Ok(())
+            return Ok(());
         }
 
         /// 3. Ignore security checks
@@ -209,7 +209,7 @@ impl Connection {
         if tcph.syn() {
             self.send_reset(nic).await?;
             self.state = State::Closed;
-            return Ok(())
+            return Ok(());
         }
 
         /// 5. Check the ack bit
@@ -267,9 +267,7 @@ impl Connection {
                     bail!("failed to establish TCP connection");
                 }
             }
-            State::Estab => {
-
-            },
+            State::Estab => {}
             State::Closed | State::Listen => {
                 println!("unexpected state {:?}", self.state);
             }
