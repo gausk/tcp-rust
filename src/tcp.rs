@@ -41,7 +41,10 @@ impl SendSequenceSpace {
     fn is_ack_in_between(&self, ack_no: u32) -> bool {
         let max_diff = self.nxt.wrapping_sub(self.una);
         let current_diff = ack_no.wrapping_sub(self.una);
-        current_diff != 0 && current_diff <= max_diff
+        //current_diff != 0 && current_diff <= max_diff
+        // From testing I have found that ACK already acknowledged is
+        // send again with data, hence removed current_diff != 0 check
+        current_diff <= max_diff
     }
 }
 

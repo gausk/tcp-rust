@@ -56,12 +56,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        bail!("Error parsing tcp header {e}");
+                        eprintln!("Error parsing tcp header {e}");
                     }
                 }
             }
             Err(e) => {
-                bail!("Error parsing ipv4 header {e}");
+                eprintln!("Error parsing ipv4 header {e}");
             }
         }
     }
