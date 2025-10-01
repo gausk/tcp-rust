@@ -1,7 +1,7 @@
-use std::io::{ErrorKind, Result};
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use rand::{Rng, rng};
 use std::collections::VecDeque;
+use std::io::{ErrorKind, Result};
 use std::task::Waker;
 use tun_rs::AsyncDevice;
 
@@ -275,7 +275,7 @@ impl Connection {
                 if tcph.ack() && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1) {
                     self.state = State::Estab;
                 } else {
-                    return Err(ErrorKind::InvalidInput.into())
+                    return Err(ErrorKind::InvalidInput.into());
                 }
             }
             State::Estab => {
