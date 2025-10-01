@@ -89,11 +89,8 @@ impl Interface {
 
 /// A TCP socket server, listening for connections.
 ///
-/// After creating a `TcpListener` by [`bind`]ing it to a socket address, it listens
-/// for incoming TCP connections. These can be accepted by calling [`accept`] or by
-/// iterating over the [`Incoming`] iterator returned by [`incoming`][`TcpListener::incoming`].
-///
-/// The socket will be closed when the value is dropped.
+/// After creating a `TcpListener` by binding it to a socket address, it listens
+/// for incoming TCP connections. These can be accepted by calling accept.
 pub struct TcpListener {
     port: u16,
     cmh: CmInterface,
@@ -136,13 +133,8 @@ impl TcpListener {
 
 /// A TCP stream between a local and a remote socket.
 ///
-/// After creating a `TcpStream` by either [`connect`]ing to a remote host or
-/// [`accept`]ing a connection on a [`TcpListener`], data can be transmitted
-/// by [reading] and [writing] to it.
-///
-/// The connection will be closed when the value is dropped. The reading and writing
-/// portions of the connection can also be shut down individually with the [`shutdown`]
-/// method.
+/// After creating a `TcpStream` by accepting a connection on a TcpListener,
+/// data can be transmitted by reading and writing to it.
 pub struct TcpStream {
     quad: Quad,
     cmh: CmInterface,

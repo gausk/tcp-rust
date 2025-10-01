@@ -9,7 +9,7 @@ pub const TCP_WINDOW_LEN: u16 = 1500;
 pub const TTL: u8 = 64;
 
 /// State of Send Sequence Space (RFC 793 S3.2 F4)
-/// ```
+/// ```text
 ///     1         2          3          4
 ///     ----------|----------|----------|----------
 ///     SND.UNA    SND.NXT    SND.UNA
@@ -51,7 +51,7 @@ impl SendSequenceSpace {
 }
 
 /// State of Receive Sequence Space (RFC 793 S3.2 F5)
-/// ```
+/// ```text
 ///    1          2          3
 ///    ----------|----------|----------
 ///    RCV.NXT    RCV.NXT
@@ -75,7 +75,7 @@ pub struct RecvSequenceSpace {
 
 impl RecvSequenceSpace {
     /// start or end bytes of the segment is within range
-    /// ```
+    /// ```text
     /// RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
     ///              OR
     /// RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
