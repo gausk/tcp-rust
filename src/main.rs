@@ -1,21 +1,11 @@
-#![allow(unused)]
-mod tcp;
-
-use anyhow::{Result, bail};
-use etherparse::icmpv4::DestUnreachableHeader::Protocol;
+use std::io::Result;
 use etherparse::ip_number::TCP;
 use etherparse::{Ipv4HeaderSlice, TcpHeaderSlice};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::net::Ipv4Addr;
-use tcp::Connection;
+use tcp_rust::Quad;
+use tcp_rust::tcp::Connection;
 use tun_rs::DeviceBuilder;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct Quad {
-    src: (Ipv4Addr, u16),
-    dst: (Ipv4Addr, u16),
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,10 +26,10 @@ async fn main() -> Result<()> {
                 match TcpHeaderSlice::from_slice(&buf[iph.slice().len()..]) {
                     Ok(tcph) => {
                         let datai = iph.slice().len() + tcph.slice().len();
-                        match connections.entry(Quad {
-                            src: (iph.source_addr(), tcph.source_port()),
-                            dst: (iph.destination_addr(), tcph.destination_port()),
-                        }) {
+                        match connections.entry(Quad::new(
+                            (iph.source_addr(), tcph.source_port()),
+                            (iph.destination_addr(), tcph.destination_port()),
+                        )) {
                             Entry::Occupied(mut entry) => {
                                 entry
                                     .get_mut()

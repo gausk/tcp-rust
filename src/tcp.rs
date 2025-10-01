@@ -1,6 +1,8 @@
-use anyhow::{Result, anyhow, bail};
+use std::io::{ErrorKind, Result};
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use rand::{Rng, rng};
+use std::collections::VecDeque;
+use std::task::Waker;
 use tun_rs::AsyncDevice;
 
 pub const TCP_WINDOW_LEN: u16 = 1500;
@@ -104,6 +106,10 @@ pub struct Connection {
     recv: RecvSequenceSpace,
     ip: Ipv4Header,
     tcp: TcpHeader,
+    pub(crate) incoming: VecDeque<u8>,
+    pub(crate) unacked: VecDeque<u8>,
+    pub(crate) read_waker: Option<Waker>,
+    pub(crate) write_waker: Option<Waker>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,13 +159,17 @@ impl Connection {
                 wl1: 0,
                 wl2: 0,
             },
-            ip: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source())?,
+            ip: Ipv4Header::new(0, TTL, IpNumber::TCP, iph.destination(), iph.source()).unwrap(),
             tcp: TcpHeader::new(
                 tcph.destination_port(),
                 tcph.source_port(),
                 send_iss,
                 TCP_WINDOW_LEN,
             ),
+            incoming: VecDeque::new(),
+            unacked: VecDeque::new(),
+            read_waker: None,
+            write_waker: None,
         };
 
         conn.tcp.ack = true;
@@ -265,7 +275,7 @@ impl Connection {
                 if tcph.ack() && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1) {
                     self.state = State::Estab;
                 } else {
-                    bail!("failed to establish TCP connection");
+                    return Err(ErrorKind::InvalidInput.into())
                 }
             }
             State::Estab => {
@@ -310,7 +320,7 @@ impl Connection {
 
         self.tcp.sequence_number = seq_no;
         self.tcp.acknowledgment_number = self.recv.nxt;
-        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, data)?;
+        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, data).unwrap();
         nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
             .await?;
         self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcp.syn, self.tcp.fin));
