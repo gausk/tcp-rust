@@ -165,6 +165,10 @@ impl AsyncRead for TcpStream {
             }
         };
 
+        if conn.is_recv_closed() && conn.incoming.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+
         if conn.incoming.is_empty() {
             conn.read_waker = Some(cx.waker().clone());
             return Poll::Pending;

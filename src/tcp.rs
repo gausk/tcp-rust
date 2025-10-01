@@ -112,7 +112,13 @@ pub struct Connection {
     pub(crate) write_waker: Option<Waker>,
 }
 
-#[derive(Debug, Clone)]
+impl Connection {
+    pub(crate) fn is_recv_closed(&self) -> bool {
+        self.state == State::TimeWait
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum State {
     Closed,
     Listen,
@@ -120,12 +126,13 @@ pub enum State {
     Estab,
     FinWait1,
     FinWait2,
+    TimeWait,
 }
 
 impl State {
     fn is_synchronized(&self) -> bool {
         match self {
-            State::Estab | State::FinWait1 | State::FinWait2 => true,
+            State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
             State::SynRcvd | State::Closed | State::Listen => false,
         }
     }
@@ -287,7 +294,7 @@ impl Connection {
                 self.tcp.fin = false;
                 self.tcp.ack = true;
             }
-            State::Closed | State::Listen => {
+            State::Closed | State::Listen | State::TimeWait => {
                 println!("unexpected state {:?}", self.state);
             }
             State::FinWait1 => {
@@ -297,10 +304,13 @@ impl Connection {
             }
             State::FinWait2 => {
                 if tcph.fin() {
-                    self.state = State::Closed;
                     self.tcp.ack = true;
                     self.write(nic, self.send.nxt, &[]).await?;
                     self.tcp.ack = false;
+                    self.state = State::TimeWait;
+                    if let Some(waker) = self.read_waker.take() {
+                        waker.wake();
+                    }
                 }
             }
         }
