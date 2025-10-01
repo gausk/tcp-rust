@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![allow(dead_code)]
 pub mod tcp;
 
 use crate::tcp::Connection;
@@ -50,7 +50,7 @@ impl Interface {
         let jh = {
             let cmh = cmh.clone();
             tokio::task::spawn(async move {
-                packet_loop(&dev, cmh).await;
+                packet_loop(&dev, cmh).await.unwrap();
             })
         };
         Ok(Interface { cmh, jh })
@@ -238,7 +238,7 @@ impl AsyncWrite for TcpStream {
                 return Poll::Pending;
             }
         };
-        let conn = match cmh.connections.get_mut(&self.quad) {
+        let _conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
             None => {
                 return Poll::Ready(Err(Error::new(
@@ -270,11 +270,11 @@ async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
                             (iph.destination_addr(), tcph.destination_port()),
                         );
                         let mut cmg = cmh.lock().await;
-                        let mut cm = &mut *cmg;
+                        let cm = &mut *cmg;
                         match cm.connections.entry(quad.clone()) {
                             Entry::Occupied(mut conn) => {
                                 conn.get_mut()
-                                    .on_packet(&dev, iph, tcph, &buf[datai..len])
+                                    .on_packet(dev, iph, tcph, &buf[datai..len])
                                     .await
                                     .unwrap();
                                 drop(cmg);
@@ -287,7 +287,7 @@ async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
                                         tcph.destination_port()
                                     );
                                     if let Some(conn) =
-                                        Connection::accept(&dev, iph, tcph, &buf[datai..len])
+                                        Connection::accept(dev, iph, tcph, &buf[datai..len])
                                             .await
                                             .unwrap()
                                     {

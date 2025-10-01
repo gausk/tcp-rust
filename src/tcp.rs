@@ -136,7 +136,7 @@ impl Connection {
         nic: &AsyncDevice,
         iph: Ipv4HeaderSlice<'a>,
         tcph: TcpHeaderSlice<'a>,
-        data: &'a [u8],
+        _data: &'a [u8],
     ) -> Result<Option<Self>> {
         if !tcph.syn() {
             return Ok(None);
@@ -183,13 +183,13 @@ impl Connection {
     pub async fn on_packet<'a>(
         &mut self,
         nic: &AsyncDevice,
-        iph: Ipv4HeaderSlice<'a>,
+        _iph: Ipv4HeaderSlice<'a>,
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
-        /// 1. Check Sequence number
+        //// 1. Check Sequence number
         let seq_no = tcph.sequence_number();
-        let mut slen = data.len() + tcph.syn() as usize + tcph.fin() as usize;
+        let slen = data.len() + tcph.syn() as usize + tcph.fin() as usize;
         if !self.recv.is_seq_in_between(seq_no, slen) {
             // If an incoming segment is not acceptable, an acknowledgment
             // should be sent in reply (unless the RST bit is set, if so drop
@@ -206,7 +206,7 @@ impl Connection {
         }
         self.recv.nxt = seq_no.wrapping_add(slen as u32);
 
-        /// 2. Check reset bit is set
+        //// 2. Check reset bit is set
         // If SYN-RECEIVED STATE, move state to Listen
         // else if state is ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2 or
         // CLOSE-WAIT, close the connection.
@@ -217,15 +217,15 @@ impl Connection {
             return Ok(());
         }
 
-        /// 3. Ignore security checks
-        /// 4. Check the SYN bit.
+        //// 3. Ignore security checks
+        //// 4. Check the SYN bit.
         if tcph.syn() {
             self.send_reset(nic).await?;
             self.state = State::Closed;
             return Ok(());
         }
 
-        /// 5. Check the ack bit
+        //// 5. Check the ack bit
         if tcph.ack() {
             let ack_no = tcph.acknowledgment_number();
             if !self.send.is_ack_in_between(ack_no) {
@@ -256,7 +256,7 @@ impl Connection {
             }
             self.send.una = ack_no;
         }
-        /// 6. Check the urg bit
+        //// 6. Check the urg bit
         if tcph.urg() {
             // TODO: Handle it correctly.
             // State: ESTABLISHED, FIN-WAIT-1 and FIN-WAIT-2
@@ -268,8 +268,8 @@ impl Connection {
             // signal the user again.
             // For other state ignore.
         }
-        /// 7. Process the segment bit.
-        /// 8. Check the fin bit.
+        //// 7. Process the segment bit.
+        //// 8. Check the fin bit.
         match self.state {
             State::SynRcvd => {
                 if tcph.ack() && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1) {
@@ -315,7 +315,9 @@ impl Connection {
     }
 
     async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, data: &[u8]) -> Result<()> {
-        self.ip.set_payload_len(self.tcp.header_len() + data.len());
+        self.ip
+            .set_payload_len(self.tcp.header_len() + data.len())
+            .unwrap();
         self.ip.header_checksum = self.ip.calc_header_checksum();
 
         self.tcp.sequence_number = seq_no;

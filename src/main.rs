@@ -11,7 +11,10 @@ async fn main() -> Result<()> {
     while let Ok(mut stream) = listener.accept().await {
         println!("Accepted a new connection!");
         tokio::spawn(async move {
-            stream.write(b"Hi GK. Testing the tcp-rust").await.unwrap();
+            stream
+                .write_all(b"Hi GK. Testing the tcp-rust")
+                .await
+                .unwrap();
             loop {
                 let mut buf = [0; 1024];
                 let n = stream.read(&mut buf[..]).await.unwrap();
