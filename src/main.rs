@@ -7,7 +7,8 @@ use tokio::io::AsyncWriteExt;
 async fn main() -> Result<()> {
     let mut inf = Interface::new().await?;
     println!("Interface created successfully!");
-    let listener = inf.bind(443).await?;
+    let mut listener = inf.bind(443).await?;
+    println!("Listener bound on port 443");
     while let Ok(mut stream) = listener.accept().await {
         println!("Accepted a new connection!");
         tokio::spawn(async move {
@@ -28,5 +29,7 @@ async fn main() -> Result<()> {
             stream.shutdown().await.unwrap();
         });
     }
+    listener.close().await?;
+    println!("All connection closed");
     Ok(())
 }

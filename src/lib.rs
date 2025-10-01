@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
@@ -29,15 +29,28 @@ impl Quad {
 }
 
 #[derive(Default)]
-pub struct ConnectionManager {
+pub struct ConnectionsInfo {
     connections: HashMap<Quad, Connection>,
     pending: HashMap<u16, VecDeque<Quad>>,
 }
 
-type CmInterface = Arc<Mutex<ConnectionManager>>;
+#[derive(Default)]
+pub struct ConnectionManager {
+    info: Mutex<ConnectionsInfo>,
+    pending_var: Notify,
+}
+
+type CmInterface = Arc<ConnectionManager>;
 pub struct Interface {
     cmh: CmInterface,
     jh: JoinHandle<()>,
+}
+
+impl Drop for Interface {
+    fn drop(&mut self) {
+        // TODO: make sure all listeners are closed
+        self.jh.abort();
+    }
 }
 
 impl Interface {
@@ -57,7 +70,7 @@ impl Interface {
     }
 
     pub async fn bind(&mut self, port: u16) -> Result<TcpListener> {
-        let mut cm = self.cmh.lock().await;
+        let mut cm = self.cmh.info.lock().await;
         match cm.pending.entry(port) {
             Entry::Vacant(v) => {
                 v.insert(VecDeque::new());
@@ -88,20 +101,36 @@ pub struct TcpListener {
 
 impl TcpListener {
     pub async fn accept(&self) -> Result<TcpStream> {
-        let mut cmh = self.cmh.lock().await;
-        if let Some(quad) = cmh
-            .pending
-            .get_mut(&self.port)
-            .expect("port closed while listener still active")
-            .pop_front()
-        {
-            Ok(TcpStream {
-                cmh: self.cmh.clone(),
-                quad,
-            })
-        } else {
-            Err(Error::new(ErrorKind::WouldBlock, "no connection to accept"))
+        loop {
+            let mut cmh = self.cmh.info.lock().await;
+            if let Some(quad) = cmh
+                .pending
+                .get_mut(&self.port)
+                .expect("port closed while listener still active")
+                .pop_front()
+            {
+                return Ok(TcpStream {
+                    cmh: self.cmh.clone(),
+                    quad,
+                });
+            }
+            let notified = self.cmh.pending_var.notified();
+            drop(cmh);
+            notified.await;
         }
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        let mut cm = self.cmh.info.lock().await;
+        let pending = cm
+            .pending
+            .remove(&self.port)
+            .expect("port closed while listener still active");
+        for quad in pending {
+            // TODO: send Fin and terminate connection
+            cm.connections.remove(&quad);
+        }
+        Ok(())
     }
 }
 
@@ -125,7 +154,7 @@ impl AsyncRead for TcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        let mut cmh = match self.cmh.try_lock() {
+        let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 // If the lock is held by another task, we register the current task
@@ -172,7 +201,7 @@ impl AsyncRead for TcpStream {
 
 impl AsyncWrite for TcpStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        let mut cmh = match self.cmh.try_lock() {
+        let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 // If the lock is held by another task, we register the current task
@@ -203,7 +232,7 @@ impl AsyncWrite for TcpStream {
         Poll::Ready(Ok(wlen))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let mut cmh = match self.cmh.try_lock() {
+        let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 // If the lock is held by another task, we register the current task
@@ -229,7 +258,7 @@ impl AsyncWrite for TcpStream {
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let mut cmh = match self.cmh.try_lock() {
+        let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 // If the lock is held by another task, we register the current task
@@ -248,6 +277,8 @@ impl AsyncWrite for TcpStream {
             }
         };
         // TODO: Close connection
+        // TODO: send FIN on cm.info.connections[quad]
+        // TODO: _eventually_ remove self.quad from cm.info.connections
         // conn.close().await
         Poll::Ready(Ok(()))
     }
@@ -269,14 +300,13 @@ async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
                             (iph.source_addr(), tcph.source_port()),
                             (iph.destination_addr(), tcph.destination_port()),
                         );
-                        let mut cmg = cmh.lock().await;
+                        let mut cmg = cmh.info.lock().await;
                         let cm = &mut *cmg;
                         match cm.connections.entry(quad.clone()) {
                             Entry::Occupied(mut conn) => {
                                 conn.get_mut()
                                     .on_packet(dev, iph, tcph, &buf[datai..len])
-                                    .await
-                                    .unwrap();
+                                    .await?;
                                 drop(cmg);
                             }
                             Entry::Vacant(e) => {
@@ -287,12 +317,12 @@ async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
                                         tcph.destination_port()
                                     );
                                     if let Some(conn) =
-                                        Connection::accept(dev, iph, tcph, &buf[datai..len])
-                                            .await
-                                            .unwrap()
+                                        Connection::accept(dev, iph, tcph, &buf[datai..len]).await?
                                     {
                                         e.insert(conn);
                                         pending.push_back(quad);
+                                        drop(cmg);
+                                        cmh.pending_var.notify_waiters();
                                     }
                                 }
                             }
@@ -316,7 +346,7 @@ sync version implementation
 impl Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let mut cmh = self.cmh.lock().unwrap();
-        let conn = cmh.connections.get_mut(&self.quad).ok_or_else(|| {
+        let conn = cmh.info.connections.get_mut(&self.quad).ok_or_else(|| {
             Error::new(
                 ErrorKind::ConnectionAborted,
                 "tcp stream aborted unexpectedly",
@@ -335,7 +365,7 @@ impl Write for TcpStream {
 
     fn flush(&mut self) -> Result<()> {
         let mut cmh = self.cmh.lock().unwrap();
-        let conn = cmh.connections.get_mut(&self.quad).ok_or_else(|| {
+        let conn = cmh.info.connections.get_mut(&self.quad).ok_or_else(|| {
             Error::new(
                 ErrorKind::ConnectionAborted,
                 "tcp stream aborted unexpectedly",
@@ -353,7 +383,7 @@ impl Write for TcpStream {
 impl TcpStream {
     pub fn shutdown(&self, how: Shutdown) -> Result<()> {
         let mut cmh = self.cmh.lock().unwrap();
-        let conn = cmh.connections.get_mut(&self.quad).ok_or_else(|| {
+        let conn = cmh.info.connections.get_mut(&self.quad).ok_or_else(|| {
             Error::new(
                 ErrorKind::ConnectionAborted,
                 "tcp stream aborted unexpectedly",
@@ -367,7 +397,7 @@ impl TcpStream {
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut cmh = self.cmh.lock().unwrap();
-        let conn = cmh.connections.get_mut(&self.quad).ok_or_else(|| {
+        let conn = cmh.info.connections.get_mut(&self.quad).ok_or_else(|| {
             Error::new(
                 ErrorKind::ConnectionAborted,
                 "tcp stream aborted unexpectedly",
