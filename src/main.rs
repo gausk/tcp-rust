@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
                     println!("Received data: {}", String::from_utf8_lossy(&buf[..n]));
                 }
             }
-            //stream.shutdown().await.unwrap();
+            stream.shutdown().await.unwrap();
         });
     }
     println!("Closing the connection!");
