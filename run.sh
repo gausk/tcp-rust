@@ -4,7 +4,7 @@ set -euo pipefail
 # Use provided CARGO_TARGET_DIR, else default to target
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
-cargo build --release
+cargo build --release > /dev/null
 
 BIN="$TARGET_DIR/release/tcp-rust"
 

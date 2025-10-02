@@ -107,6 +107,7 @@ pub struct Connection {
     pub(crate) unacked: VecDeque<u8>,
     pub(crate) read_waker: Option<Waker>,
     pub(crate) write_waker: Option<Waker>,
+    closed: bool,
 }
 
 impl Connection {
@@ -181,6 +182,7 @@ impl Connection {
             unacked: VecDeque::new(),
             read_waker: None,
             write_waker: None,
+            closed: false,
         };
 
         conn.tcp.ack = true;
@@ -379,6 +381,28 @@ impl Connection {
         nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
             .await?;
         self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcp.syn, self.tcp.fin));
+        Ok(())
+    }
+
+    /// Shuts down the output stream, ensuring that the value can be dropped cleanly.
+    /// all intermediately buffered is written to the underlying stream.
+    /// Once the operation completes, the caller should no longer attempt to write to the stream.
+    pub fn close(&mut self) -> Result<()> {
+        self.closed = true;
+        match self.state {
+            State::SynRcvd | State::Estab => {
+                self.state = State::FinWait1;
+            }
+            State::FinWait1 | State::FinWait2 => {}
+            State::Closed | State::TimeWait | State::Listen => {
+                return Err(ErrorKind::NotConnected.into());
+            }
+        }
+        Ok(())
+    }
+
+    // Basically handles retransmission in case of timeout
+    pub async fn on_tick(&mut self, _nic: &AsyncDevice) -> Result<()> {
         Ok(())
     }
 }

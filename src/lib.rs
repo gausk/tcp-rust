@@ -11,9 +11,11 @@ use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -57,7 +59,7 @@ impl Interface {
     pub async fn new() -> Result<Self> {
         let dev = DeviceBuilder::new()
             .name("utun7")
-            .ipv4("192.68.0.1", 24, None)
+            .ipv4("192.168.0.1", 24, None)
             .build_async()?;
         let cmh: CmInterface = Arc::default();
         let jh = {
@@ -263,7 +265,7 @@ impl AsyncWrite for TcpStream {
                 return Poll::Pending;
             }
         };
-        let _conn = match cmh.connections.get_mut(&self.quad) {
+        let conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
             None => {
                 return Poll::Ready(Err(Error::new(
@@ -272,18 +274,27 @@ impl AsyncWrite for TcpStream {
                 )));
             }
         };
-        // TODO: Close connection
-        // TODO: send FIN on cm.info.connections[quad]
         // TODO: _eventually_ remove self.quad from cm.info.connections
-        // conn.close().await
-        Poll::Ready(Ok(()))
+        Poll::Ready(conn.close())
     }
 }
 
 async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
     let mut buf = [0; 1500];
     loop {
-        let len = dev.recv(&mut buf).await.unwrap();
+        let len = match timeout(Duration::from_millis(10), dev.recv(&mut buf)).await {
+            Ok(Ok(len)) => len,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => 0,
+        };
+        if len == 0 {
+            let mut cmg = cmh.info.lock().await;
+            for conn in cmg.connections.values_mut() {
+                // XXX: Better handling of error?
+                conn.on_tick(dev).await?;
+            }
+            continue;
+        }
         match Ipv4HeaderSlice::from_slice(&buf[..len]) {
             Ok(iph) => {
                 if iph.protocol() != TCP {

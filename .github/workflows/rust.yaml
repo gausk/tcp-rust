@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install tshark
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint with clippy
@@ -22,3 +24,5 @@ jobs:
         run: cargo build --verbose --release
       - name: Run tests
         run: cargo test --verbose --release
+      - name: Complete Testing
+        run: bash test.sh
