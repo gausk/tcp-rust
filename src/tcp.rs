@@ -133,6 +133,13 @@ impl State {
             State::SynRcvd | State::Closed | State::Listen => false,
         }
     }
+
+    fn is_recv(&self) -> bool {
+        match &self {
+            State::Estab | State::FinWait1 | State::FinWait2 => true,
+            State::SynRcvd | State::Closed | State::Listen | State::TimeWait => false,
+        }
+    }
 }
 
 impl Connection {
@@ -283,9 +290,18 @@ impl Connection {
         }
         //// 7. Process the segment bit.
         //// 8. Check the fin bit.
+        if self.state.is_recv() {
+            self.incoming.extend(data);
+            if let Some(waker) = self.read_waker.take() {
+                waker.wake();
+            }
+        }
         match self.state {
             State::SynRcvd => {
-                if tcph.ack() && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1) {
+                if tcph.ack()
+                    && tcph.acknowledgment_number() == self.send.iss.wrapping_add(1)
+                    && data.is_empty()
+                {
                     self.state = State::Estab;
                 } else {
                     return Err(ErrorKind::InvalidInput.into());
@@ -302,6 +318,7 @@ impl Connection {
             }
             State::Closed | State::Listen | State::TimeWait => {
                 println!("unexpected state {:?}", self.state);
+                return Err(ErrorKind::Other.into());
             }
             State::FinWait1 => {
                 if tcph.ack() {
