@@ -215,7 +215,6 @@ impl Connection {
                 return Ok(());
             }
         }
-        self.recv.nxt = seq_no.wrapping_add(slen as u32);
 
         //// 2. Check reset bit is set
         // If SYN-RECEIVED STATE, move state to Listen
@@ -237,7 +236,11 @@ impl Connection {
         }
 
         //// 5. Check the ack bit
-        if tcph.ack() {
+        // if the ACK bit is off drop the segment and return
+        if !tcph.ack() {
+            return Ok(());
+        } else {
+            // if the ACK bit is on
             let ack_no = tcph.acknowledgment_number();
             if !self.send.is_ack_in_between(ack_no) {
                 // If the connection is in a synchronized state (ESTABLISHED,
@@ -272,9 +275,15 @@ impl Connection {
                     self.tcp.ack = false;
                     return Ok(());
                 }
+            } else {
+                // TODO: unacked should drain for data and not fin and syn bit
+                self.unacked.drain(0..(ack_no - self.send.nxt) as usize);
+                if let Some(waker) = self.write_waker.take() {
+                    waker.wake();
+                }
+                self.send.una = ack_no;
+                self.send.wnd = tcph.window_size();
             }
-            self.send.una = ack_no;
-            self.send.wnd = tcph.window_size();
         }
         //// 6. Check the urg bit
         if tcph.urg() {
@@ -288,14 +297,25 @@ impl Connection {
             // signal the user again.
             // For other state ignore.
         }
-        //// 7. Process the segment bit.
-        //// 8. Check the fin bit.
-        if self.state.is_recv() {
-            self.incoming.extend(data);
+        //// 7. Process the segment bit. //// 8. Check the fin bit.
+        //
+        // ESTABLISHED STATE
+        // FIN-WAIT-1 STATE
+        // FIN-WAIT-2 STATE
+        //
+        // Once the TCP takes responsibility for the data it advances
+        // RCV.NXT over the data accepted, and adjusts RCV.WND as
+        // appropriate to the current buffer availability.  The total of
+        // RCV.NXT and RCV.WND should not be reduced
+        if self.state.is_recv() && !data.is_empty() {
+            // TODO: In case of retransmission there might be a issue here.
+            self.incoming
+                .extend(&data[(self.recv.nxt - seq_no) as usize..]);
             if let Some(waker) = self.read_waker.take() {
                 waker.wake();
             }
         }
+        self.recv.nxt = seq_no.wrapping_add(slen as u32);
         match self.state {
             State::SynRcvd => {
                 if tcph.ack()
