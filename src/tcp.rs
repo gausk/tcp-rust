@@ -43,10 +43,7 @@ impl SendSequenceSpace {
     fn is_ack_in_between(&self, ack_no: u32) -> bool {
         let max_diff = self.nxt.wrapping_sub(self.una);
         let current_diff = ack_no.wrapping_sub(self.una);
-        //current_diff != 0 && current_diff <= max_diff
-        // From testing I have found that ACK already acknowledged is
-        // send again with data, hence removed current_diff != 0 check
-        current_diff <= max_diff
+        current_diff != 0 && current_diff <= max_diff
     }
 }
 
@@ -255,13 +252,22 @@ impl Connection {
                 if !self.state.is_synchronized() {
                     // <SEQ=SEG.ACK><CTL=RST>
                     // TODO: we should send ack number in sequence number here
-                    self.send_reset(nic).await?
+                    self.send_reset(nic).await?;
+                    return Ok(());
+                } else if tcph.acknowledgment_number() <= self.send.una {
+                    // If the ACK is a duplicate
+                    // (SEG.ACK < SND.UNA), it can be ignored
                 } else {
-                    // TODO: send ack here.
+                    // If the ACK acks something not yet sent (SEG.ACK > SND.NXT),
+                    // then send an ACK, drop the segment, and return.
+                    self.tcp.ack = true;
+                    self.write(nic, self.send.nxt, &[]).await?;
+                    self.tcp.ack = false;
+                    return Ok(());
                 }
-                return Ok(());
             }
             self.send.una = ack_no;
+            self.send.wnd = tcph.window_size();
         }
         //// 6. Check the urg bit
         if tcph.urg() {
