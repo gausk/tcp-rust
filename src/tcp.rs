@@ -110,6 +110,7 @@ pub struct Connection {
     pub(crate) write_waker: Option<Waker>,
     closed: bool,
     timers: Timers,
+    fin_seq_no: Option<u32>,
 }
 
 impl Connection {
@@ -127,23 +128,84 @@ pub enum State {
     FinWait1,
     FinWait2,
     TimeWait,
+    CloseWait,
+    Closing,
+    LastAck,
 }
 
 impl State {
     fn is_synchronized(&self) -> bool {
         match self {
-            State::Estab | State::FinWait1 | State::FinWait2 | State::TimeWait => true,
-            State::SynRcvd | State::Closed | State::Listen => false,
+            State::Estab
+            | State::FinWait1
+            | State::FinWait2
+            | State::CloseWait
+            | State::LastAck
+            | State::Closing => true,
+            State::SynRcvd | State::Closed | State::Listen | State::TimeWait => false,
         }
     }
 
     fn is_recv(&self) -> bool {
         match &self {
             State::Estab | State::FinWait1 | State::FinWait2 => true,
-            State::SynRcvd | State::Closed | State::Listen | State::TimeWait => false,
+            State::SynRcvd
+            | State::Closed
+            | State::Listen
+            | State::TimeWait
+            | State::CloseWait
+            | State::LastAck
+            | State::Closing => false,
         }
     }
 }
+
+// State Diagram
+//
+// +---------+ ---------\      active OPEN
+// |  CLOSED |            \    -----------
+// +---------+<---------\   \   create TCB
+// |     ^              \   \  snd SYN
+// passive OPEN |     |   CLOSE        \   \
+// ------------ |     | ----------       \   \
+// create TCB  |     | delete TCB         \   \
+// V     |                      \   \
+// +---------+            CLOSE    |    \
+// |  LISTEN |          ---------- |     |
+// +---------+          delete TCB |     |
+// rcv SYN      |     |     SEND              |     |
+// -----------   |     |    -------            |     V
+// +---------+      snd SYN,ACK  /       \   snd SYN          +---------+
+// |         |<-----------------           ------------------>|         |
+// |   SYN   |                    rcv SYN                     |   SYN   |
+// |   RCVD  |<-----------------------------------------------|   SENT  |
+// |         |                    snd ACK                     |         |
+// |         |------------------           -------------------|         |
+// +---------+   rcv ACK of SYN  \       /  rcv SYN,ACK       +---------+
+// |           --------------   |     |   -----------
+// |                  x         |     |     snd ACK
+// |                            V     V
+// |  CLOSE                   +---------+
+// | -------                  |  ESTAB  |
+// | snd FIN                  +---------+
+// |                   CLOSE    |     |    rcv FIN
+// V                  -------   |     |    -------
+// +---------+          snd FIN  /       \   snd ACK          +---------+
+// |  FIN    |<-----------------           ------------------>|  CLOSE  |
+// | WAIT-1  |------------------                              |   WAIT  |
+// +---------+          rcv FIN  \                            +---------+
+// | rcv ACK of FIN   -------   |                            CLOSE  |
+// | --------------   snd ACK   |                           ------- |
+// V        x                   V                           snd FIN V
+// +---------+                  +---------+                   +---------+
+// |FINWAIT-2|                  | CLOSING |                   | LAST-ACK|
+// +---------+                  +---------+                   +---------+
+// |                rcv ACK of FIN |                 rcv ACK of FIN |
+// |  rcv FIN       -------------- |    Timeout=2MSL -------------- |
+// |  -------              x       V    ------------        x       V
+// \ snd ACK                 +---------+delete TCB         +---------+
+// ------------------------>|TIME WAIT|------------------>| CLOSED  |
+// +---------+                   +---------+
 
 impl Connection {
     pub async fn accept<'a>(
@@ -186,11 +248,12 @@ impl Connection {
             write_waker: None,
             closed: false,
             timers: Timers::default(),
+            fin_seq_no: None,
         };
 
         conn.tcp.ack = true;
         conn.tcp.syn = true;
-        conn.write(nic, send_iss, &[]).await?;
+        conn.write(nic, send_iss, 0).await?;
         conn.tcp.ack = false;
         conn.tcp.syn = false;
         Ok(Some(conn))
@@ -215,7 +278,7 @@ impl Connection {
             if !tcph.rst() {
                 self.tcp.ack = true;
                 // passing seq number here and ack get set in write function
-                self.write(nic, self.send.nxt, &[]).await?;
+                self.write(nic, self.send.nxt, 0).await?;
                 self.tcp.ack = false;
                 return Ok(());
             }
@@ -276,7 +339,7 @@ impl Connection {
                     // If the ACK acks something not yet sent (SEG.ACK > SND.NXT),
                     // then send an ACK, drop the segment, and return.
                     self.tcp.ack = true;
-                    self.write(nic, self.send.nxt, &[]).await?;
+                    self.write(nic, self.send.nxt, 0).await?;
                     self.tcp.ack = false;
                     return Ok(());
                 }
@@ -334,27 +397,38 @@ impl Connection {
                 }
             }
             State::Estab => {
-                // For now let's terminate the connection!
-                self.tcp.fin = true;
+                // If received fin, change status to CloseWait
+                if tcph.fin() {
+                    self.state = State::CloseWait;
+                }
                 self.tcp.ack = true;
-                self.write(nic, self.send.nxt, &[]).await?;
-                self.state = State::FinWait1;
-                self.tcp.fin = false;
-                self.tcp.ack = true;
+                self.write(nic, self.send.nxt, 1500).await?;
+                self.tcp.ack = false;
             }
             State::Closed | State::Listen | State::TimeWait => {
                 println!("unexpected state {:?}", self.state);
                 return Err(ErrorKind::Other.into());
             }
             State::FinWait1 => {
-                if tcph.ack() {
+                // If fin is acked change status to FinWait2
+                if tcph.ack()
+                    && self
+                        .fin_seq_no
+                        .is_some_and(|seq_no| seq_no < tcph.acknowledgment_number())
+                {
                     self.state = State::FinWait2;
+                } else if tcph.fin() {
+                    // if client also sent fin, ack the fin and change the status to closing
+                    self.tcp.ack = true;
+                    self.write(nic, self.send.nxt, 0).await?;
+                    self.tcp.ack = false;
+                    self.state = State::Closing;
                 }
             }
             State::FinWait2 => {
                 if tcph.fin() {
                     self.tcp.ack = true;
-                    self.write(nic, self.send.nxt, &[]).await?;
+                    self.write(nic, self.send.nxt, 0).await?;
                     self.tcp.ack = false;
                     self.state = State::TimeWait;
                     if let Some(waker) = self.read_waker.take() {
@@ -362,18 +436,36 @@ impl Connection {
                     }
                 }
             }
+            State::Closing | State::LastAck => {
+                // If recv ack of fin change status to TimeWait
+                if tcph.ack()
+                    && self
+                        .fin_seq_no
+                        .is_some_and(|seq_no| seq_no < tcph.acknowledgment_number())
+                {
+                    self.state = State::TimeWait;
+                }
+            }
+            State::CloseWait => {
+                // send fin
+                if self.fin_seq_no.is_none() {
+                    self.closed = true;
+                }
+                // We should ideally push data and fin first, then update status
+                self.state = State::LastAck;
+            }
         }
         Ok(())
     }
 
     async fn send_reset(&mut self, nic: &AsyncDevice) -> Result<()> {
         self.tcp.rst = true;
-        self.write(nic, 0, &[]).await?;
+        self.write(nic, 0, 0).await?;
         self.tcp.rst = false;
         Ok(())
     }
 
-    async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, data: &[u8]) -> Result<()> {
+    async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, limit: usize) -> Result<()> {
         self.ip
             .set_payload_len(self.tcp.header_len() + data.len())
             .unwrap();
@@ -398,7 +490,8 @@ impl Connection {
             State::SynRcvd | State::Estab => {
                 self.state = State::FinWait1;
             }
-            State::FinWait1 | State::FinWait2 => {}
+            State::CloseWait => self.state = State::LastAck,
+            State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck => {}
             State::Closed | State::TimeWait | State::Listen => {
                 return Err(ErrorKind::NotConnected.into());
             }
