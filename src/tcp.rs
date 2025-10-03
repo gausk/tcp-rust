@@ -162,50 +162,50 @@ impl State {
 
 // State Diagram
 //
-// +---------+ ---------\      active OPEN
-// |  CLOSED |            \    -----------
-// +---------+<---------\   \   create TCB
-// |     ^              \   \  snd SYN
-// passive OPEN |     |   CLOSE        \   \
-// ------------ |     | ----------       \   \
-// create TCB  |     | delete TCB         \   \
-// V     |                      \   \
-// +---------+            CLOSE    |    \
-// |  LISTEN |          ---------- |     |
-// +---------+          delete TCB |     |
-// rcv SYN      |     |     SEND              |     |
-// -----------   |     |    -------            |     V
-// +---------+      snd SYN,ACK  /       \   snd SYN          +---------+
-// |         |<-----------------           ------------------>|         |
-// |   SYN   |                    rcv SYN                     |   SYN   |
-// |   RCVD  |<-----------------------------------------------|   SENT  |
-// |         |                    snd ACK                     |         |
-// |         |------------------           -------------------|         |
-// +---------+   rcv ACK of SYN  \       /  rcv SYN,ACK       +---------+
-// |           --------------   |     |   -----------
-// |                  x         |     |     snd ACK
-// |                            V     V
-// |  CLOSE                   +---------+
-// | -------                  |  ESTAB  |
-// | snd FIN                  +---------+
-// |                   CLOSE    |     |    rcv FIN
-// V                  -------   |     |    -------
-// +---------+          snd FIN  /       \   snd ACK          +---------+
-// |  FIN    |<-----------------           ------------------>|  CLOSE  |
-// | WAIT-1  |------------------                              |   WAIT  |
-// +---------+          rcv FIN  \                            +---------+
-// | rcv ACK of FIN   -------   |                            CLOSE  |
-// | --------------   snd ACK   |                           ------- |
-// V        x                   V                           snd FIN V
-// +---------+                  +---------+                   +---------+
-// |FINWAIT-2|                  | CLOSING |                   | LAST-ACK|
-// +---------+                  +---------+                   +---------+
-// |                rcv ACK of FIN |                 rcv ACK of FIN |
-// |  rcv FIN       -------------- |    Timeout=2MSL -------------- |
-// |  -------              x       V    ------------        x       V
-// \ snd ACK                 +---------+delete TCB         +---------+
-// ------------------------>|TIME WAIT|------------------>| CLOSED  |
-// +---------+                   +---------+
+//  +---------+ ---------\      active OPEN
+//  |  CLOSED |            \    -----------
+//  +---------+<---------\   \   create TCB
+//  |     ^              \   \  snd SYN
+//  passive OPEN |     |   CLOSE        \   \
+//  ------------ |     | ----------       \   \
+//  create TCB  |     | delete TCB         \   \
+//  V     |                      \   \
+//  +---------+            CLOSE    |    \
+//  |  LISTEN |          ---------- |     |
+//  +---------+          delete TCB |     |
+//  rcv SYN      |     |     SEND              |     |
+//  -----------   |     |    -------            |     V
+//  +---------+      snd SYN,ACK  /       \   snd SYN          +---------+
+//  |         |<-----------------           ------------------>|         |
+//  |   SYN   |                    rcv SYN                     |   SYN   |
+//  |   RCVD  |<-----------------------------------------------|   SENT  |
+//  |         |                    snd ACK                     |         |
+//  |         |------------------           -------------------|         |
+//  +---------+   rcv ACK of SYN  \       /  rcv SYN,ACK       +---------+
+//  |           --------------   |     |   -----------
+//  |                  x         |     |     snd ACK
+//  |                            V     V
+//  |  CLOSE                   +---------+
+//  | -------                  |  ESTAB  |
+//  | snd FIN                  +---------+
+//  |                   CLOSE    |     |    rcv FIN
+//  V                  -------   |     |    -------
+//  +---------+          snd FIN  /       \   snd ACK          +---------+
+//  |  FIN    |<-----------------           ------------------>|  CLOSE  |
+//  | WAIT-1  |------------------                              |   WAIT  |
+//  +---------+          rcv FIN  \                            +---------+
+//  | rcv ACK of FIN   -------   |                            CLOSE  |
+//  | --------------   snd ACK   |                           ------- |
+//  V        x                   V                           snd FIN V
+//  +---------+                  +---------+                   +---------+
+//  |FINWAIT-2|                  | CLOSING |                   | LAST-ACK|
+//  +---------+                  +---------+                   +---------+
+//  |                rcv ACK of FIN |                 rcv ACK of FIN |
+//  |  rcv FIN       -------------- |    Timeout=2MSL -------------- |
+//  |  -------              x       V    ------------        x       V
+//  \ snd ACK                 +---------+delete TCB         +---------+
+//  ------------------------>|TIME WAIT|------------------>| CLOSED  |
+//  +---------+                   +---------+
 
 impl Connection {
     pub async fn accept<'a>(
@@ -344,8 +344,14 @@ impl Connection {
                     return Ok(());
                 }
             } else {
-                // TODO: unacked should drain for data and not fin and syn bit
-                self.unacked.drain(0..(ack_no - self.send.nxt) as usize);
+                // First bit sent is syn bit and last bit is ack bit in tcp data sent
+                // So, unacked is zero if ACK for SYN received, adding min len take care of this.
+                // FIN, is the last thing to be acknowledged so min length take cae of it as well.
+                self.unacked.drain(
+                    0..ack_no
+                        .wrapping_sub(self.send.una)
+                        .min(self.unacked.len() as u32) as usize,
+                );
                 if let Some(waker) = self.write_waker.take() {
                     waker.wake();
                 }
@@ -416,7 +422,15 @@ impl Connection {
                         .fin_seq_no
                         .is_some_and(|seq_no| seq_no < tcph.acknowledgment_number())
                 {
-                    self.state = State::FinWait2;
+                    // If it contains ack as well let's
+                    if tcph.fin() {
+                        self.tcp.ack = true;
+                        self.write(nic, self.send.nxt, 0).await?;
+                        self.tcp.ack = false;
+                        self.state = State::TimeWait;
+                    } else {
+                        self.state = State::FinWait2;
+                    }
                 } else if tcph.fin() {
                     // if client also sent fin, ack the fin and change the status to closing
                     self.tcp.ack = true;
@@ -431,9 +445,11 @@ impl Connection {
                     self.write(nic, self.send.nxt, 0).await?;
                     self.tcp.ack = false;
                     self.state = State::TimeWait;
-                    if let Some(waker) = self.read_waker.take() {
-                        waker.wake();
-                    }
+                } else if !data.is_empty() {
+                    // If received data send ack
+                    self.tcp.ack = true;
+                    self.write(nic, self.send.nxt, 0).await?;
+                    self.tcp.ack = false;
                 }
             }
             State::Closing | State::LastAck => {
@@ -466,13 +482,18 @@ impl Connection {
     }
 
     async fn write(&mut self, nic: &AsyncDevice, seq_no: u32, limit: usize) -> Result<()> {
+        let mut buf = [0u8; 1500];
+        self.tcp.sequence_number = seq_no;
+        self.tcp.acknowledgment_number = self.recv.nxt;
+
+        // data handling
+        let mut offset = seq_no.wrapping_sub(self.send.una);
+
         self.ip
             .set_payload_len(self.tcp.header_len() + data.len())
             .unwrap();
         self.ip.header_checksum = self.ip.calc_header_checksum();
 
-        self.tcp.sequence_number = seq_no;
-        self.tcp.acknowledgment_number = self.recv.nxt;
         self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, data).unwrap();
         nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
             .await?;
@@ -502,6 +523,9 @@ impl Connection {
     // Basically handles retransmission in case of
     // timeout or else send unsent data.
     pub async fn on_tick(&mut self, _nic: &AsyncDevice) -> Result<()> {
+        if let State::TimeWait | State::FinWait2 | State::Closed | State::Listen = self.state {
+            return Ok(());
+        }
         if self.timers.is_retransmit() {
             // do retransmit
         } else {
