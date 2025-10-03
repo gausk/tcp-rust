@@ -1,3 +1,4 @@
+use crate::timer::Timers;
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
 use rand::{Rng, rng};
 use std::collections::VecDeque;
@@ -108,6 +109,7 @@ pub struct Connection {
     pub(crate) read_waker: Option<Waker>,
     pub(crate) write_waker: Option<Waker>,
     closed: bool,
+    timers: Timers,
 }
 
 impl Connection {
@@ -183,6 +185,7 @@ impl Connection {
             read_waker: None,
             write_waker: None,
             closed: false,
+            timers: Timers::default(),
         };
 
         conn.tcp.ack = true;
@@ -283,6 +286,7 @@ impl Connection {
                 if let Some(waker) = self.write_waker.take() {
                     waker.wake();
                 }
+                self.timers.on_ack(ack_no);
                 self.send.una = ack_no;
                 self.send.wnd = tcph.window_size();
             }
@@ -381,6 +385,7 @@ impl Connection {
         nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
             .await?;
         self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcp.syn, self.tcp.fin));
+        self.timers.on_send(seq_no);
         Ok(())
     }
 
@@ -401,8 +406,14 @@ impl Connection {
         Ok(())
     }
 
-    // Basically handles retransmission in case of timeout
+    // Basically handles retransmission in case of
+    // timeout or else send unsent data.
     pub async fn on_tick(&mut self, _nic: &AsyncDevice) -> Result<()> {
+        if self.timers.is_retransmit() {
+            // do retransmit
+        } else {
+            // do normal send
+        }
         Ok(())
     }
 }

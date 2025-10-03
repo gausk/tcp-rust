@@ -1,5 +1,6 @@
 #![allow(dead_code)]
-pub mod tcp;
+mod tcp;
+mod timer;
 
 use crate::tcp::Connection;
 use etherparse::ip_number::TCP;

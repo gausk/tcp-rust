@@ -10,7 +10,7 @@ sudo tshark -i utun7 > tshark.log 2>&1 &
 tshark_pid=$!
 
 sleep 10
-echo "Sending Data using netcat..."
+echo "Sending data using netcat..."
 echo "Hello from GK" | nc 192.168.0.2 443
 
 echo "Wait for background task to complete..."
