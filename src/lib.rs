@@ -283,7 +283,7 @@ impl AsyncWrite for TcpStream {
 async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
     let mut buf = [0; 1500];
     loop {
-        let len = match timeout(Duration::from_millis(10), dev.recv(&mut buf)).await {
+        let len = match timeout(Duration::from_secs(2), dev.recv(&mut buf)).await {
             Ok(Ok(len)) => len,
             Ok(Err(e)) => return Err(e),
             Err(_) => 0,
@@ -313,7 +313,7 @@ async fn packet_loop(dev: &AsyncDevice, cmh: CmInterface) -> Result<()> {
                         match cm.connections.entry(quad.clone()) {
                             Entry::Occupied(mut conn) => {
                                 conn.get_mut()
-                                    .on_packet(dev, iph, tcph, &buf[datai..len])
+                                    .on_packet(dev, tcph, &buf[datai..len])
                                     .await?;
                                 drop(cmg);
                             }

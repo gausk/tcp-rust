@@ -46,6 +46,13 @@ impl SendSequenceSpace {
         let current_diff = ack_no.wrapping_sub(self.una);
         current_diff != 0 && current_diff <= max_diff
     }
+
+    fn data_limit(&self, is_fin: bool) -> usize {
+        self.una
+            .wrapping_add(self.wnd as u32)
+            .wrapping_sub(self.nxt)
+            .wrapping_sub(is_fin as u32) as usize
+    }
 }
 
 /// State of Receive Sequence Space (RFC 793 S3.2 F5)
@@ -262,7 +269,6 @@ impl Connection {
     pub async fn on_packet<'a>(
         &mut self,
         nic: &AsyncDevice,
-        _iph: Ipv4HeaderSlice<'a>,
         tcph: TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> Result<()> {
@@ -345,11 +351,11 @@ impl Connection {
                 }
             } else {
                 // First bit sent is syn bit and last bit is ack bit in tcp data sent
-                // So, unacked is zero if ACK for SYN received, adding min len take care of this.
-                // FIN, is the last thing to be acknowledged so min length take cae of it as well.
+                // So, unacked is zero if ACK for SYN received, subtract from ack the max(send.iss+1, send.una)
+                // FIN, is the last thing to be acknowledged so min length take cae of it.
                 self.unacked.drain(
                     0..ack_no
-                        .wrapping_sub(self.send.una)
+                        .wrapping_sub(self.send.una.max(self.send.iss + 1))
                         .min(self.unacked.len() as u32) as usize,
                 );
                 if let Some(waker) = self.write_waker.take() {
@@ -405,11 +411,17 @@ impl Connection {
             State::Estab => {
                 // If received fin, change status to CloseWait
                 if tcph.fin() {
+                    self.closed = true;
                     self.state = State::CloseWait;
                 }
-                self.tcp.ack = true;
-                self.write(nic, self.send.nxt, 1500).await?;
-                self.tcp.ack = false;
+                // If just ack don't do anything
+                if tcph.fin() || !data.is_empty() {
+                    self.tcp.ack = true;
+                    // maybe we can use on_tick here.
+                    self.write(nic, self.send.nxt, self.send.data_limit(false))
+                        .await?;
+                    self.tcp.ack = false;
+                }
             }
             State::Closed | State::Listen | State::TimeWait => {
                 println!("unexpected state {:?}", self.state);
@@ -422,7 +434,7 @@ impl Connection {
                         .fin_seq_no
                         .is_some_and(|seq_no| seq_no < tcph.acknowledgment_number())
                 {
-                    // If it contains ack as well let's
+                    // If it contains fin as well let's move directly to TimeWait
                     if tcph.fin() {
                         self.tcp.ack = true;
                         self.write(nic, self.send.nxt, 0).await?;
@@ -486,18 +498,50 @@ impl Connection {
         self.tcp.sequence_number = seq_no;
         self.tcp.acknowledgment_number = self.recv.nxt;
 
-        // data handling
-        let mut offset = seq_no.wrapping_sub(self.send.una);
+        let tcph_len = self.tcp.header_len();
+        let iph_len = self.ip.header_len();
+        let hdr_len = iph_len + tcph_len;
+        let max_payload_len = buf.len() - hdr_len;
 
+        // data handling
+        let offset = seq_no.wrapping_sub(self.send.una) as usize;
+        let (front, back) = self.unacked.as_slices();
+        let data_iter = front.iter().chain(back).skip(offset);
+        let payload_buf = &mut buf[hdr_len..];
+        let payload_len = data_iter
+            .take(limit.min(max_payload_len))
+            .zip(payload_buf.iter_mut())
+            .map(|(src, dst)| *dst = *src)
+            .count();
+
+        // update header checksum
         self.ip
-            .set_payload_len(self.tcp.header_len() + data.len())
+            .set_payload_len(tcph_len + payload_len) // data + tcp header len
             .unwrap();
         self.ip.header_checksum = self.ip.calc_header_checksum();
 
-        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, data).unwrap();
-        nic.send(&[&self.ip.to_bytes(), &self.tcp.to_bytes(), data].concat())
-            .await?;
-        self.send.nxt = seq_no.wrapping_add(segment_length(data, self.tcp.syn, self.tcp.fin));
+        self.tcp.checksum = self
+            .tcp
+            .calc_checksum_ipv4(&self.ip, &buf[hdr_len..hdr_len + payload_len])
+            .unwrap();
+
+        buf[..iph_len].copy_from_slice(&self.ip.to_bytes());
+        buf[iph_len..hdr_len].copy_from_slice(&self.tcp.to_bytes());
+        nic.send(&buf[..hdr_len + payload_len]).await?;
+        //println!("Buf sent: {:x?}", &buf[..hdr_len + payload_len]);
+        self.send.nxt = self.send.nxt.max(seq_no.wrapping_add(segment_length(
+            payload_len,
+            self.tcp.syn,
+            self.tcp.fin,
+        )));
+        if self.tcp.fin {
+            // last data sent is the seq no if fin set
+            // fin managed by on_tick function.
+            if self.fin_seq_no.is_none() {
+                self.fin_seq_no = Some(self.send.nxt.wrapping_sub(1));
+            }
+            self.tcp.fin = false;
+        }
         self.timers.on_send(seq_no);
         Ok(())
     }
@@ -522,20 +566,45 @@ impl Connection {
 
     // Basically handles retransmission in case of
     // timeout or else send unsent data.
-    pub async fn on_tick(&mut self, _nic: &AsyncDevice) -> Result<()> {
+    pub async fn on_tick(&mut self, nic: &AsyncDevice) -> Result<()> {
         if let State::TimeWait | State::FinWait2 | State::Closed | State::Listen = self.state {
             return Ok(());
         }
+
         if self.timers.is_retransmit() {
-            // do retransmit
+            let resent_data = self.unacked.len().min(self.send.wnd as usize);
+            // Include fin if possible
+            if resent_data < self.send.wnd as usize && self.closed {
+                self.tcp.fin = true;
+            }
+            // if there is data to be transmitted or FIN not acknowledged
+            if resent_data > 0
+                || (self.closed && self.fin_seq_no.is_none_or(|seq_no| seq_no >= self.recv.nxt))
+            {
+                self.tcp.ack = true;
+                self.write(nic, self.send.una, resent_data).await?;
+                self.tcp.ack = false;
+            }
         } else {
-            // do normal send
+            // Do normal send
+            let unacked_data = self.send.nxt.wrapping_sub(self.send.una);
+            let nunsent_data = self.unacked.len() as u32 - unacked_data;
+            if nunsent_data == 0 && self.fin_seq_no.is_some() {
+                return Ok(());
+            }
+            if (nunsent_data as usize) < self.send.data_limit(false) && self.closed {
+                self.tcp.fin = true;
+            }
+            self.tcp.ack = true;
+            self.write(nic, self.send.nxt, self.send.data_limit(self.tcp.fin))
+                .await?;
+            self.tcp.ack = false;
         }
         Ok(())
     }
 }
 
-fn segment_length(data: &[u8], is_syn: bool, is_fin: bool) -> u32 {
+fn segment_length(data_len: usize, is_syn: bool, is_fin: bool) -> u32 {
     // SEG.LEN = the number of octets occupied by the data in the segment (counting SYN and FIN)
-    data.len() as u32 + is_syn as u32 + is_fin as u32
+    data_len as u32 + is_syn as u32 + is_fin as u32
 }

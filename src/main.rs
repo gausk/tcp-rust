@@ -9,15 +9,18 @@ use tokio::time::timeout;
 async fn main() -> Result<()> {
     let mut inf = Interface::new().await?;
     println!("Interface created successfully!");
-    let mut listener = inf.bind(443).await?;
-    println!("Listener bound on port 443");
+    let mut listener = inf.bind(80).await?;
+    println!("Listener bound on port 80");
     while let Ok(Ok(mut stream)) = timeout(Duration::from_secs(60), listener.accept()).await {
         println!("Accepted a new connection!");
         tokio::spawn(async move {
+            stream.write_all(b"Hi GK!\n").await.unwrap();
             stream
-                .write_all(b"Hi GK. Testing the tcp-rust")
+                .write_all(b"We have built an amazing rust-tcp crate!\n")
                 .await
                 .unwrap();
+            // shutdown write
+            stream.shutdown().await.unwrap();
             loop {
                 let mut buf = [0; 1024];
                 let n = stream.read(&mut buf[..]).await.unwrap();
@@ -28,8 +31,6 @@ async fn main() -> Result<()> {
                     println!("Received data: {}", String::from_utf8_lossy(&buf[..n]));
                 }
             }
-            // shutdown write
-            stream.shutdown().await.unwrap();
         });
     }
     println!("Closing the connection!");

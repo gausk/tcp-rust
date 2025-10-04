@@ -11,7 +11,7 @@ tshark_pid=$!
 
 sleep 10
 echo "Sending data using netcat..."
-echo "Hello from GK" | nc 192.168.0.2 443
+echo "Hi rust-tcp server!" | nc 192.168.0.2 80
 
 echo "Wait for background task to complete..."
 wait $run_pid
