@@ -151,12 +151,7 @@ impl AsyncRead for TcpStream {
     ) -> Poll<Result<()>> {
         let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                // If the lock is held by another task, we register the current task
-                // for wake-up and return Pending.
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            Err(_) => return Poll::Pending,
         };
         let conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
@@ -202,12 +197,7 @@ impl AsyncWrite for TcpStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                // If the lock is held by another task, we register the current task
-                // for wake-up and return Pending.
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            Err(_) => return Poll::Pending,
         };
         let conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
@@ -233,12 +223,7 @@ impl AsyncWrite for TcpStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                // If the lock is held by another task, we register the current task
-                // for wake-up and return Pending.
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            Err(_) => return Poll::Pending,
         };
         let conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
@@ -256,15 +241,10 @@ impl AsyncWrite for TcpStream {
             Poll::Pending
         }
     }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         let mut cmh = match self.cmh.info.try_lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                // If the lock is held by another task, we register the current task
-                // for wake-up and return Pending.
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            Err(_) => return Poll::Pending,
         };
         let conn = match cmh.connections.get_mut(&self.quad) {
             Some(conn) => conn,
