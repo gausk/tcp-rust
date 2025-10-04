@@ -1,5 +1,21 @@
-# TCP In Rust
+# TCP Implementation in Rust
 
+A custom TCP/IP stack implementation written in Rust, built from scratch using TUN/TAP interfaces. This project provides a complete TCP implementation with connection management, packet parsing, and async I/O support.
+
+## Features
+1. **TUN Interface Setup**: Creates a virtual network interface to capture and inject packets
+2. **TCP State Machine**: Implements the full TCP state machine (SYN, ESTABLISHED, FIN, etc.)
+3. **Packet Processing**: Parses incoming packets and routes them to appropriate connections
+4. **Async Handling**: Uses Tokio for non-blocking I/O and concurrent connection handling
+5. **Connection Tracking**: Maintains connection state using hash maps with quad-tuple keys
+
+## Usage
+
+### Running the Server
+
+```bash
+cargo run
+```
 
 ### Test
 ```bash
